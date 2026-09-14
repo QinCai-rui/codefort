@@ -24,8 +24,9 @@ from the server environment at startup so it never appears in `/proc`.
   2 GB floor), CPU seconds, max 128 processes, and 64 MB aggregate writable
   scratch storage.
 - Request sizes, timeouts, and memory values are clamped at the API boundary.
-- At most 2 concurrent executions (429 beyond that) plus per-client rate
-  limiting; container mem/cpu/pid limits are the hard backstops.
+- At most 2 concurrent executions (503 when the executor is full) plus
+  per-client rate limiting (429); container mem/cpu/pid limits are the hard
+  backstops.
 
 ## Sandbox model
 

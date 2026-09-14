@@ -33,8 +33,9 @@ COPY languages ./languages
 # namespace mapping that uid to jail-nobody. Unprivileged user namespaces
 # are sufficient for the whole sandbox (verified), so the container needs no
 # capabilities at all — see docker-compose.yml (cap_drop: ALL).
-# RLIMIT_NPROC enforcement depends on this: uid-0 processes are exempt.
-RUN chown -R 65534:65534 /app
+# Keep application files root-owned and non-writable by the API user. Jobs use
+# their dedicated /tmp directories instead of writing under /app.
+RUN chmod -R a=rX /app
 USER 65534:65534
 ENV HOME=/tmp
 

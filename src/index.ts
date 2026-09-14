@@ -142,14 +142,14 @@ v1.post(
       compileTimeout: z.number().min(1).max(120_000).default(10_000).openapi({
         description: 'The time limit of the compile process, in milliseconds.',
       }),
-      compileMemoryLimit: z.number().min(0).max(4096).default(512).openapi({
+      compileMemoryLimit: z.number().int().min(0).max(4096).default(512).openapi({
         description:
           'The memory limit of the compile process, in megabytes. NOTE: currently admission-only, enforced at the container level.',
       }),
       runTimeout: z.number().min(1).max(120_000).default(10_000).openapi({
         description: 'The time limit of the run process, in milliseconds.',
       }),
-      runMemoryLimit: z.number().min(0).max(4096).default(512).openapi({
+      runMemoryLimit: z.number().int().min(0).max(4096).default(512).openapi({
         description:
           'The memory limit of the run process, in megabytes. NOTE: currently admission-only, enforced at the container level.',
       }),

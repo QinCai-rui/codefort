@@ -16,9 +16,9 @@ const ExecuteOptions = z.object({
   // NOTE: memory limits are admission-only today (clamped + documented in the
   // API schema). Enforcement happens at the container level via compose
   // mem_limit. Per-job cgroup enforcement is a known gap.
-  compileMemoryLimit: z.number().min(0).max(4096),
+  compileMemoryLimit: z.number().int().min(0).max(4096),
   runTimeout: z.number().min(1).max(120_000),
-  runMemoryLimit: z.number().min(0).max(4096),
+  runMemoryLimit: z.number().int().min(0).max(4096),
 });
 
 const projectRootPath = resolve(import.meta.dir, '../');
@@ -256,7 +256,7 @@ function killTree(proc: Subprocess) {
 async function runSandboxed(
   args: string[],
   opts: { cwd: string; stdin?: string; timeoutMs: number; storageDir: string },
-): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
+): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean; signalCode: string | null }> {
   const proc = Bun.spawn(args, {
     cwd: opts.cwd,
     stdin: opts.stdin !== undefined ? new Response(opts.stdin) : undefined,
@@ -271,7 +271,10 @@ async function runSandboxed(
     timedOut = true;
     killTree(proc);
   }, opts.timeoutMs);
+  let monitoring = false;
   const resourceMonitor = setInterval(() => {
+    if (monitoring) return;
+    monitoring = true;
     void Promise.all([directorySize(opts.storageDir), processGroupSize(proc.pid)])
       .then(([bytes, processes]) => {
         if (bytes > MAX_FSIZE_BYTES || processes > MAX_JOB_PROCESSES) {
@@ -282,19 +285,22 @@ async function runSandboxed(
       .catch(() => {
         resourceLimitExceeded = true;
         killTree(proc);
+      })
+      .finally(() => {
+        monitoring = false;
       });
   }, 50);
 
   try {
-    // Null when killed by signal: normalize to 124 like timeout(1).
-    const exitCode = (await proc.exited) ?? 124;
+    const result = await proc.exited;
     return {
-      exitCode,
+      exitCode: timedOut ? 124 : (result ?? 1),
       stdout: await new Response(proc.stdout).text(),
       stderr:
         (await new Response(proc.stderr).text()) +
         (resourceLimitExceeded ? '\nExecution exceeded its per-job resource limit.\n' : ''),
       timedOut,
+      signalCode: proc.signalCode,
     };
   } finally {
     clearTimeout(timer);
