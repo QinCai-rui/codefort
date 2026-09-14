@@ -20,8 +20,9 @@ from the server environment at startup so it never appears in `/proc`.
 
 - Timeouts (`compileTimeout`/`runTimeout`) are enforced per process, and the
   whole job tree is SIGKILLed as a process group on timeout (no orphan leaks).
-- Per-job ceilings via prlimit: virtual memory (4x requested MB, 2 GB floor),
-  CPU seconds, max 128 processes (fork-bomb bound), 64 MB file writes.
+- Per-job ceilings via prlimit and watchdogs: virtual memory (4x requested MB,
+  2 GB floor), CPU seconds, max 128 processes, and 64 MB aggregate writable
+  scratch storage.
 - Request sizes, timeouts, and memory values are clamped at the API boundary.
 - At most 2 concurrent executions (429 beyond that) plus per-client rate
   limiting; container mem/cpu/pid limits are the hard backstops.
@@ -35,6 +36,8 @@ namespaces, cleared environment, fresh `/dev`, a private `/tmp` per job, and
 read-only system mounts. Memory limits remain admission-only at the API
 (the prlimit ceiling is on virtual memory); resident enforcement is at the
 container level. Hosts that forbid unprivileged user namespaces cannot run
-this (bubblewrap refuses); a fresh `/proc` mount is skipped on
+this (bubblewrap refuses); the Compose stack uses custom seccomp/AppArmor
+profiles and fails closed if the host has not loaded the AppArmor profile;
+a fresh `/proc` mount is skipped on
 SELinux-enforcing hosts where it fails — the userns boundary still denies
 cross-namespace `/proc/PID/environ` reads (verified).

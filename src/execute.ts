@@ -1,7 +1,7 @@
 import 'zod-openapi/extend';
 import { z } from 'zod';
 import { languages } from './languages';
-import { mkdtemp } from 'fs/promises';
+import { mkdtemp, readdir, lstat, readFile } from 'fs/promises';
 import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import { rm } from 'fs/promises';
@@ -83,18 +83,42 @@ const SANDBOX_UID = 65534;
 const SANDBOX_GID = 65534;
 
 // Per-job resource ceilings enforced with prlimit(1); inherited by children.
-// NOTE: RLIMIT_NPROC only bites because the container runs non-root (uid 0
-// is exempt from the nproc check); RLIMIT_AS caps virtual memory with a
-// generous floor since runtimes reserve address space aggressively.
-const MAX_NPROC = 128; // fork-bomb bound (container pids_limit is the backstop)
-const MAX_FSIZE_BYTES = 64 * 1024 * 1024; // cap on output/artifact disk writes
+// PID and storage totals are watched separately because RLIMIT_NPROC and
+// RLIMIT_FSIZE are shared/per-file limits rather than per-job boundaries.
+const MAX_JOB_PROCESSES = 128;
+const MAX_FSIZE_BYTES = 64 * 1024 * 1024;
 const AS_MULTIPLIER = 4; // virtual-memory headroom over the requested MB...
 const AS_FLOOR_MB = 2048; // ...with a floor so runtimes don't false-trip
 
 function resourceLimits(memoryMb: number, timeoutMs: number): string[] {
   const asBytes = Math.max(memoryMb * AS_MULTIPLIER, AS_FLOOR_MB) * 1024 * 1024;
   const cpuSec = Math.ceil(timeoutMs / 1000) + 5;
-  return ['prlimit', `--as=${asBytes}`, `--cpu=${cpuSec}`, `--nproc=${MAX_NPROC}`, `--fsize=${MAX_FSIZE_BYTES}`, '--'];
+  return ['prlimit', `--as=${asBytes}`, `--cpu=${cpuSec}`, `--fsize=${MAX_FSIZE_BYTES}`, '--'];
+}
+
+async function directorySize(path: string): Promise<number> {
+  let total = 0;
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) total += await directorySize(child);
+    else if (entry.isFile()) total += (await lstat(child)).size;
+  }
+  return total;
+}
+
+async function processGroupSize(groupId: number): Promise<number> {
+  let total = 0;
+  for (const pid of await readdir('/proc')) {
+    if (!/^\d+$/.test(pid)) continue;
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      if (Number(fields[2]) === groupId) total++;
+    } catch {
+      // Processes can exit while /proc is being inspected.
+    }
+  }
+  return total;
 }
 
 // Helper function to create bubblewrap args with minimal permissions.
@@ -231,7 +255,7 @@ function killTree(proc: Subprocess) {
 
 async function runSandboxed(
   args: string[],
-  opts: { cwd: string; stdin?: string; timeoutMs: number },
+  opts: { cwd: string; stdin?: string; timeoutMs: number; storageDir: string },
 ): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
   const proc = Bun.spawn(args, {
     cwd: opts.cwd,
@@ -242,10 +266,24 @@ async function runSandboxed(
   });
 
   let timedOut = false;
+  let resourceLimitExceeded = false;
   const timer = setTimeout(() => {
     timedOut = true;
     killTree(proc);
   }, opts.timeoutMs);
+  const resourceMonitor = setInterval(() => {
+    void Promise.all([directorySize(opts.storageDir), processGroupSize(proc.pid)])
+      .then(([bytes, processes]) => {
+        if (bytes > MAX_FSIZE_BYTES || processes > MAX_JOB_PROCESSES) {
+          resourceLimitExceeded = true;
+          killTree(proc);
+        }
+      })
+      .catch(() => {
+        resourceLimitExceeded = true;
+        killTree(proc);
+      });
+  }, 50);
 
   try {
     // Null when killed by signal: normalize to 124 like timeout(1).
@@ -253,11 +291,14 @@ async function runSandboxed(
     return {
       exitCode,
       stdout: await new Response(proc.stdout).text(),
-      stderr: await new Response(proc.stderr).text(),
+      stderr:
+        (await new Response(proc.stderr).text()) +
+        (resourceLimitExceeded ? '\nExecution exceeded its per-job resource limit.\n' : ''),
       timedOut,
     };
   } finally {
     clearTimeout(timer);
+    clearInterval(resourceMonitor);
   }
 }
 
@@ -289,6 +330,7 @@ export async function execute(optionsRaw: z.infer<typeof ExecuteOptions>): Promi
       const compile = await runSandboxed(compileArgs, {
         cwd: tempDir,
         timeoutMs: options.compileTimeout,
+        storageDir: tempDir,
       });
       compileExitCode = compile.exitCode;
       compileTime = Date.now() - startCompileTime;
@@ -326,6 +368,7 @@ export async function execute(optionsRaw: z.infer<typeof ExecuteOptions>): Promi
       cwd: tempDir,
       stdin: options.stdin,
       timeoutMs: options.runTimeout,
+      storageDir: tempDir,
     });
 
     // Never log options: it contains the submitted source code.
@@ -349,9 +392,15 @@ export async function execute(optionsRaw: z.infer<typeof ExecuteOptions>): Promi
       },
     };
   } finally {
-    await rm(tempDir, {
-      recursive: true,
-      force: true,
-    });
+    try {
+      await rm(tempDir, {
+        recursive: true,
+        force: true,
+      });
+    } catch (e) {
+      // Sandbox mounts can briefly outlive the child process. Do not turn a
+      // completed execution into HTTP 500 just because cleanup was denied.
+      console.error('Failed to clean execution directory:', e);
+    }
   }
 }

@@ -36,12 +36,26 @@ v1.use('/run', async (c, next) => {
 // memory are the hard backstops).
 const MAX_CONCURRENT_RUNS = 2;
 let inFlightRuns = 0;
-const RUN_RATE_LIMIT = 30;
+// A single submission can contain up to 100 testcases, and the caller queues
+// them one at a time. Keep this above that bounded batch so the limiter does
+// not reject the rest of an otherwise valid submission.
+const RUN_RATE_LIMIT = 10_000;
 const RUN_RATE_WINDOW_MS = 60_000;
+const MAX_RATE_LIMIT_KEYS = 10_000;
 const runHits = new Map<string, number[]>();
 
 function runRateAllowed(key: string, now = Date.now()): boolean {
   const cutoff = now - RUN_RATE_WINDOW_MS;
+  for (const [storedKey, storedHits] of runHits) {
+    const activeHits = storedHits.filter((t) => t > cutoff);
+    if (activeHits.length === 0) runHits.delete(storedKey);
+    else if (activeHits.length !== storedHits.length) runHits.set(storedKey, activeHits);
+  }
+  while (runHits.size >= MAX_RATE_LIMIT_KEYS && !runHits.has(key)) {
+    const oldestKey = runHits.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    runHits.delete(oldestKey);
+  }
   const hits = (runHits.get(key) ?? []).filter((t) => t > cutoff);
   if (hits.length >= RUN_RATE_LIMIT) {
     runHits.set(key, hits);
@@ -154,7 +168,7 @@ v1.post(
       return c.json({ error: 'Too many requests' }, 429);
     }
     if (inFlightRuns >= MAX_CONCURRENT_RUNS) {
-      return c.json({ error: 'Executor busy, try again later' }, 429);
+      return c.json({ error: 'Executor busy, try again later' }, 503);
     }
     inFlightRuns++;
     try {

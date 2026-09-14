@@ -9,6 +9,9 @@ services:
       # Only publish wider when CODEFORT_TOKEN is set and understood.
       - '127.0.0.1:3000:3000'
     restart: unless-stopped
+    # Reap orphaned sandbox descendants so completed runs do not consume the
+    # container PID budget as zombies.
+    init: true
     environment:
       - NODE_ENV=production
       # Shared secret for POST /v1/run (callers send `Authorization: Bearer ...`).
